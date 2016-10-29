@@ -138,11 +138,73 @@ public:
 
     }
 
+    void poseEstimationByMomentOfInertia(PointCloudXYZ::Ptr input_pts,Eigen::Matrix4f& Pose,bool is_viz)
+    {
+        pcl::MomentOfInertiaEstimation <pcl::PointXYZ> feature_extractor;
+        feature_extractor.setInputCloud (input_pts);
+        feature_extractor.compute ();
+
+        pcl::PointXYZ min_point_OBB;
+        pcl::PointXYZ max_point_OBB;
+        pcl::PointXYZ position_OBB;
+        Eigen::Matrix3f rotational_matrix_OBB;
+        float major_value, middle_value, minor_value;
+        Eigen::Vector3f major_vector, middle_vector, minor_vector;
+        Eigen::Vector3f mass_center;
+
+        feature_extractor.getOBB (min_point_OBB, max_point_OBB, position_OBB, rotational_matrix_OBB);
+        feature_extractor.getEigenValues (major_value, middle_value, minor_value);
+        feature_extractor.getEigenVectors (major_vector, middle_vector, minor_vector);
+        feature_extractor.getMassCenter (mass_center);
+
+        //Angle
+        Eigen::Vector4f v1(minor_vector[0],minor_vector[1],minor_vector[2],0.0);
+        Eigen::Vector4f v2(0.0,0.0,1.0,0.0);
+        double theta= pcl::getAngle3D(v1,v2);
+        theta=theta/M_PI*180.0;
+        if(theta<90.0){
+            minor_vector[0]=-minor_vector[0];
+            minor_vector[1]=-minor_vector[1];
+            minor_vector[2]=-minor_vector[2];
+        }
+
+        //Fill the pose matrix
+        Pose << major_vector[0],middle_vector[0],minor_vector[0],mass_center[0],
+                major_vector[1],middle_vector[1],minor_vector[1],mass_center[1],
+                major_vector[2],middle_vector[2],minor_vector[2],mass_center[2],
+                0,0,0,1;
+        std::cout<<Pose<<endl;
+
+        if(is_viz)
+        {
+            boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("3D Viewer"));
+            viewer->setBackgroundColor (0, 0, 0);
+            viewer->addCoordinateSystem (0.1);
+            viewer->initCameraParameters ();
+
+            Eigen::Vector3f position (position_OBB.x, position_OBB.y, position_OBB.z);
+            Eigen::Quaternionf quat (rotational_matrix_OBB);
+            viewer->addCube (position, quat, max_point_OBB.x - min_point_OBB.x, max_point_OBB.y - min_point_OBB.y, max_point_OBB.z - min_point_OBB.z,"OBB");
+
+            pcl::PointXYZ center (mass_center (0), mass_center (1), mass_center (2));
+            pcl::PointXYZ x_axis (major_vector (0)/10 + mass_center (0), major_vector (1)/10 + mass_center (1), major_vector (2)/10 + mass_center (2));
+            pcl::PointXYZ y_axis (middle_vector (0)/10 + mass_center (0), middle_vector (1)/10 + mass_center (1), middle_vector (2)/10 + mass_center (2));
+            pcl::PointXYZ z_axis (minor_vector (0)/10 + mass_center (0), minor_vector (1)/10 + mass_center (1), minor_vector (2)/10 + mass_center (2));
+            viewer->addLine (center, x_axis, 1.0f, 0.0f, 0.0f, "major eigen vector");
+            viewer->addLine (center, y_axis, 0.0f, 1.0f, 0.0f, "middle eigen vector");
+            viewer->addLine (center, z_axis, 0.0f, 0.0f, 1.0f, "minor eigen vector");
+            viewer->addPointCloud(pts_);
+            viewer->spin();
+
+        }
+
+    }
+
 };
 
 int main(int argc,char** argv)
 {
-    ramRecg ram_rec("/home/yake/catkin_ws/src/ram_assembly/pcd/1477109739_pc.pcd");
+    ramRecg ram_rec("/home/yake/catkin_ws/src/ram_assembly/pcd/1477109696_pc.pcd");
     pcl::PointIndices::Ptr plane_indices(new pcl::PointIndices);
     ram_rec.plane_segment_proc(ram_rec.pts_,ram_rec.pts_no_plane,0.01,plane_indices,true);
 
@@ -150,63 +212,10 @@ int main(int argc,char** argv)
     PointCloudXYZ::Ptr ram(new PointCloudXYZ);
     ram_rec.regionGrowingseg(ram_rec.pts_no_plane,ram);
 
-    //PCA Analysis
-//    pcl::PCA<pcl::PointXYZ> pca;
-//    pca.setInputCloud(ram);
-//    Eigen::Matrix3f eigen_vec=pca.getEigenVectors();
-//    int p;
-
-    pcl::MomentOfInertiaEstimation <pcl::PointXYZ> feature_extractor;
-    feature_extractor.setInputCloud (ram);
-    feature_extractor.compute ();
-
-    std::vector <float> moment_of_inertia;
-    std::vector <float> eccentricity;
-    pcl::PointXYZ min_point_AABB;
-    pcl::PointXYZ max_point_AABB;
-    pcl::PointXYZ min_point_OBB;
-    pcl::PointXYZ max_point_OBB;
-    pcl::PointXYZ position_OBB;
-    Eigen::Matrix3f rotational_matrix_OBB;
-    float major_value, middle_value, minor_value;
-    Eigen::Vector3f major_vector, middle_vector, minor_vector;
-    Eigen::Vector3f mass_center;
-
-    feature_extractor.getOBB (min_point_OBB, max_point_OBB, position_OBB, rotational_matrix_OBB);
-    feature_extractor.getEigenValues (major_value, middle_value, minor_value);
-    feature_extractor.getEigenVectors (major_vector, middle_vector, minor_vector);
-    feature_extractor.getMassCenter (mass_center);
-
-    //Angle
-    Eigen::Vector4f v1(minor_vector[0],minor_vector[1],minor_vector[2],0.0);
-    Eigen::Vector4f v2(0.0,0.0,1.0,0.0);
-    double theta= pcl::getAngle3D(v1,v2);
-    theta=theta/M_PI*180.0;
-    if(theta<90.0){
-        minor_vector[0]=-minor_vector[0];
-        minor_vector[1]=-minor_vector[1];
-        minor_vector[2]=-minor_vector[2];
-    }
+    //Use PCA analysis to get pose
+    Eigen::Matrix4f pose;
+    ram_rec.poseEstimationByMomentOfInertia(ram,pose,false);
 
 
-    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("3D Viewer"));
-    viewer->setBackgroundColor (0, 0, 0);
-    viewer->addCoordinateSystem (0.1);
-    viewer->initCameraParameters ();
-
-    Eigen::Vector3f position (position_OBB.x, position_OBB.y, position_OBB.z);
-    Eigen::Quaternionf quat (rotational_matrix_OBB);
-    viewer->addCube (position, quat, max_point_OBB.x - min_point_OBB.x, max_point_OBB.y - min_point_OBB.y, max_point_OBB.z - min_point_OBB.z, "OBB");
-
-    pcl::PointXYZ center (mass_center (0), mass_center (1), mass_center (2));
-    pcl::PointXYZ x_axis (major_vector (0) + mass_center (0), major_vector (1) + mass_center (1), major_vector (2) + mass_center (2));
-    pcl::PointXYZ y_axis (middle_vector (0) + mass_center (0), middle_vector (1) + mass_center (1), middle_vector (2) + mass_center (2));
-    pcl::PointXYZ z_axis (minor_vector (0) + mass_center (0), minor_vector (1) + mass_center (1), minor_vector (2) + mass_center (2));
-    viewer->addLine (center, x_axis, 1.0f, 0.0f, 0.0f, "major eigen vector");
-    viewer->addLine (center, y_axis, 0.0f, 1.0f, 0.0f, "middle eigen vector");
-    viewer->addLine (center, z_axis, 0.0f, 0.0f, 1.0f, "minor eigen vector");
-    viewer->addPointCloud(ram_rec.pts_);
-
-    viewer->spin();
 
 }
