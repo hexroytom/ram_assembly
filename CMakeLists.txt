@@ -20,6 +20,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(PCL REQUIRED)
 
+
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 
@@ -128,6 +129,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
 )
 
+
 ## Declare a C++ library
  add_library(MomentOfInertiaEstimation
    src/moment_of_inertia_estimation.cpp
@@ -144,6 +146,7 @@ target_link_libraries(MomentOfInertiaEstimation
 
 ## Declare a C++ executable
  add_executable(ram_recog_node src/ram_recog.cpp)
+ add_executable(calibration_node src/extrinsic_calibration.cpp)
 
 ## Add cmake target dependencies of the executable
 ## same as for the library above
@@ -155,6 +158,11 @@ target_link_libraries(MomentOfInertiaEstimation
    ${catkin_LIBRARIES}
    ${PCL_LIBRARIES}
  )
+
+target_link_libraries(calibration_node
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
 
 #############
 ## Install ##

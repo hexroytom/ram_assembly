@@ -214,7 +214,7 @@ int main(int argc,char** argv)
 
     //Use PCA analysis to get pose
     Eigen::Matrix4f pose;
-    ram_rec.poseEstimationByMomentOfInertia(ram,pose,false);
+    ram_rec.poseEstimationByMomentOfInertia(ram,pose,true);
 
 
 
