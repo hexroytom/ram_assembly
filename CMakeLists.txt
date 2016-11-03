@@ -19,6 +19,7 @@ find_package(catkin REQUIRED COMPONENTS
 )
 
 find_package(PCL REQUIRED)
+find_package(ensenso REQUIRED)
 
 
 ## System dependencies are found with CMake's conventions
