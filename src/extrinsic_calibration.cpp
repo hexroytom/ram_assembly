@@ -8,6 +8,8 @@
 #include <eigen_conversions/eigen_msg.h>
 #include <ensenso/CapturePattern.h>
 #include <ensenso/InitCalibration.h>
+#include <ensenso/ComputeCalibration.h>
+#include <ensenso/RegistImage.h>
 
 #include <string>
 
@@ -67,9 +69,11 @@ class ex_cal
     //Service client
     ros::ServiceClient capture_pattern_client;
     ros::ServiceClient init_cal_client;
+    ros::ServiceClient compute_cal_client;
     //Service srv
     ensenso::InitCalibration init_cal_srv;
     ensenso::CapturePattern capture_pattern_srv;
+    ensenso::ComputeCalibration compute_cal_srv;
 
 public:
     ex_cal(int num_poses,std::string tcp_name):
@@ -82,6 +86,7 @@ public:
         //initialize service client
         capture_pattern_client = nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
         init_cal_client = nh.serviceClient<ensenso::InitCalibration>("init_calibration");
+        compute_cal_client = nh.serviceClient<ensenso::ComputeCalibration>("compute_calibration");
     }
 
     bool performCalibration()
@@ -119,7 +124,7 @@ public:
 
         marker_pub.publish(sphere);
 
-        //Store UR poses
+        //vector for storing UR poses
         std::vector<Eigen::Affine3d, Eigen::aligned_allocator<Eigen::Affine3d> > robot_poses;
         int fail_count=0;
 
@@ -147,16 +152,17 @@ public:
                 return false;
             }
 
-
+            //get a random point on the hemisphere
             tf::poseEigenToMsg(generateRandomHemispherePose(obj_origin,tool_origin),wayPoint);
-            //Move UR to wayPoint
+
+            //Move UR to the random point
                 //...
 
             //sleep until UR reach the goal point
             sleep(1);
 
             //Collect patterns
-            //block until service available
+                //block until service available
             ros::service::waitForService("capture_pattern");
             capture_pattern_client.call(capture_pattern_srv);
 
@@ -164,14 +170,15 @@ public:
             {
                 fail_count++;
                 //Move UR to defalut pose
+                    //...
                 continue;
             }
 
             //collect robot pose
             try{
                 ros::Time now(ros::Time::now());
-                listener.waitForTransform("/base","/tool0",now,ros::Duration(1.5));
-                listener.lookupTransform("/base","/tool0",now,transform_stamped);
+                listener.waitForTransform("/base",tcp_name_,now,ros::Duration(1.5));
+                listener.lookupTransform("/base",tcp_name_,now,transform_stamped);
                 Eigen::Affine3d robot_pose;
                 tf::transformTFToEigen(transform_stamped,robot_pose);
                 robot_poses.push_back(robot_pose);
@@ -190,7 +197,35 @@ public:
         }
 
         //Perform calibration
-            //...
+        status.data = "Computing calibration matrix...";
+        status_pub.publish(status);
+
+        if(robot_poses.size()!=capture_pattern_srv.response.pattern_count){
+            ROS_ERROR("The number of robot poses is not consistent with the counts of pattern. Aborting calibraiton!");
+            return false;
+        }else{
+            std::string result;
+            //Initialize srv request
+            compute_cal_srv.request.store_to_eeprom=true;
+            tf::poseEigenToMsg(Eigen::Affine3d::Identity(),compute_cal_srv.request.seed);
+                //Populate the srv poses
+            compute_cal_srv.request.robotposes.poses.resize(robot_poses.size());
+            for(int i=0;i<robot_poses.size();++i)
+                tf::poseEigenToMsg(robot_poses[i],compute_cal_srv.request.robotposes.poses[i]);
+            //call the srv
+            compute_cal_client.call(compute_cal_srv);
+        }
+        if(compute_cal_srv.response.success){
+            ROS_INFO("Calibraiton computation finishes");
+            ROS_INFO("Result: ");
+            ROS_INFO("Position: x = %f, y = %f, z = %f",compute_cal_srv.response.result.position.x,compute_cal_srv.response.result.position.y,compute_cal_srv.response.result.position.z);
+            ROS_INFO("Orientation: w = %f, x = %f, y = %f, z = %f",compute_cal_srv.response.result.orientation.w,compute_cal_srv.response.result.orientation.x,compute_cal_srv.response.result.orientation.y,compute_cal_srv.response.result.orientation.z);
+
+        }else{
+            ROS_ERROR("Fail to compute extrinsic calibration!");
+            return false;
+        }
+
 
         //save calibration
             //...
@@ -212,28 +247,25 @@ int main(int argc, char** argv)
     ros::init(argc,argv,"extrin_cal");
     ros::NodeHandle nh;
 
+    //Publisher
+    ros::Publisher image_pub=nh.advertise<sensor_msgs::Image>("/registered_image",1);
+    ros::Publisher cloud_pub=nh.advertise<sensor_msgs::PointCloud2>("/registered_pointcloud",1);
+
     //Service client
     ros::ServiceClient capture_pattern_client=nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
     ros::ServiceClient ini_cal_client=nh.serviceClient<ensenso::InitCalibration>("init_calibration");
+    ros::ServiceClient grab_registered_image_client=nh.serviceClient<ensenso::RegistImage>("grab_registered_image");
     //Service srv
-    ensenso::InitCalibration ini_cal_srv;
-    ini_cal_srv.request.grid_spacing=20.0;
-    ros::service::waitForService("init_calibration");
-    ini_cal_client.call(ini_cal_srv);
-    bool is_success=ini_cal_srv.response.success;
+    ensenso::RegistImage grab_registImg_srv;
+    grab_registImg_srv.request.is_rgb=true;
 
-    int num_pattern=5;
-    int i=0;
-    ensenso::CapturePattern capture_pattern_srv;
-    while(i<num_pattern)
-    {
-        ros::service::waitForService("capture_pattern");
-        capture_pattern_client.call(capture_pattern_srv);
-        bool success = capture_pattern_srv.response.success;
-        i=capture_pattern_srv.response.pattern_count;
-        sleep(1);
+    ros::Rate loop(1);
+    while(ros::ok()){
+        grab_registered_image_client.call(grab_registImg_srv);
+        image_pub.publish(grab_registImg_srv.response.image);
+        cloud_pub.publish(grab_registImg_srv.response.pointcloud);
+        loop.sleep();
     }
-
 
 
     return 0;
