@@ -16,10 +16,12 @@ find_package(catkin REQUIRED COMPONENTS
   std_srvs
   tf_conversions
   image_transport
+  trac_ik_lib
 )
 
 find_package(PCL REQUIRED)
 find_package(ensenso REQUIRED)
+find_package(orocos_kdl REQUIRED)
 
 
 ## System dependencies are found with CMake's conventions
@@ -128,6 +130,7 @@ include_directories(include)
 include_directories(
   ${catkin_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
+  ${orocos_kdl_INCLUDE_DIRS}
 )
 
 
@@ -163,6 +166,7 @@ target_link_libraries(MomentOfInertiaEstimation
 target_link_libraries(calibration_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
+  ${orocos_kdl_LIBRARIES}
 )
 
 #############

@@ -11,6 +11,16 @@
 #include <ensenso/ComputeCalibration.h>
 #include <ensenso/RegistImage.h>
 
+//msg
+#include <control_msgs/FollowJointTrajectoryAction.h>
+
+//action
+#include <actionlib/client/simple_action_client.h>
+
+//trac_ik
+#include <trac_ik/trac_ik.hpp>
+#include <kdl/chainiksolverpos_nr_jl.hpp>
+
 #include <string>
 
 Eigen::Affine3d generateRandomHemispherePose(const Eigen::Vector3d &obj_origin, const Eigen::Vector3d &tool_origin)
@@ -76,10 +86,22 @@ class ex_cal
     ensenso::ComputeCalibration compute_cal_srv;
 
 public:
-    ex_cal(int num_poses,std::string tcp_name):
-        num_poses_(num_poses),
-        tcp_name_(tcp_name)
+    ex_cal(int num_poses):
+        num_poses_(num_poses)
     {
+        //initialize parameters
+        nh.param("chain_start", chain_start_, std::string("base"));
+        nh.param("chain_end", chain_end_, std::string("tool0"));
+        base_name_=chain_start_;
+        tcp_name_=chain_end_;
+        nh.param("timeout", timeout_, 0.005);
+        nh.param("urdf_param", urdf_param_, std::string("/robot_description"));
+        joint_names.push_back("shoulder_pan_joint");
+        joint_names.push_back("shoulder_lift_joint");
+        joint_names.push_back("elbow_joint");
+        joint_names.push_back("wrist_1_joint");
+        joint_names.push_back("wrist_2_joint");
+        joint_names.push_back("wrist_3_joint");
         //initialize publisher
         status_pub=nh.advertise<std_msgs::String>("ensenso_calibration_status",1);
         marker_pub=nh.advertise<visualization_msgs::Marker>("hemisphere",1);
@@ -87,6 +109,78 @@ public:
         capture_pattern_client = nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
         init_cal_client = nh.serviceClient<ensenso::InitCalibration>("init_calibration");
         compute_cal_client = nh.serviceClient<ensenso::ComputeCalibration>("compute_calibration");
+    }
+
+    bool ur5_trac_ik(const std::string& chain_start, const std::string& chain_end,const geometry_msgs::Pose& pose,control_msgs::FollowJointTrajectoryActionGoal& actGoal)
+    {
+        double eps = 1e-5;
+
+        // This constructor parses the URDF loaded in rosparm urdf_param into the
+        // needed KDL structures.  We then pull these out to compare against the KDL
+        // IK solver.
+        TRAC_IK::TRAC_IK tracik_solver(chain_start, chain_end, urdf_param_, timeout_, eps);
+
+        KDL::Chain chain;
+        KDL::JntArray ll, ul; //lower joint limits, upper joint limits
+
+        bool valid = tracik_solver.getKDLChain(chain);
+        if (!valid) {
+          ROS_ERROR("There was no valid KDL chain found");
+          return false;
+        }
+
+        valid = tracik_solver.getKDLLimits(ll,ul);
+        if (!valid) {
+          ROS_ERROR("There were no valid KDL joint limits found");
+          return false;
+        }
+
+        assert(chain.getNrOfJoints() == ll.data.size());
+        assert(chain.getNrOfJoints() == ul.data.size());
+
+        // Create Nominal chain configuration midway between all joint limits
+        KDL::JntArray nominal(chain.getNrOfJoints());
+        for (uint j=0; j<nominal.data.size(); j++) {
+          nominal(j) = (ll(j)+ul(j))/2.0;
+        }
+
+        //Convert geometry_msg/pose to eigen pose
+        Eigen::Affine3d eiPose;
+        tf::poseMsgToEigen(pose,eiPose);
+        //Asign value to KDL pose
+        KDL::Frame end_effector_pose;
+        end_effector_pose.M.data[0] = eiPose(0,0);
+        end_effector_pose.M.data[1] = eiPose(0,1);
+        end_effector_pose.M.data[2] = eiPose(0,2);
+        end_effector_pose.p.data[0] = eiPose(0,3);
+        end_effector_pose.M.data[3] = eiPose(1,0);
+        end_effector_pose.M.data[4] = eiPose(1,1);
+        end_effector_pose.M.data[5] = eiPose(1,2);
+        end_effector_pose.p.data[1] = eiPose(1,3);
+        end_effector_pose.M.data[6] = eiPose(2,0);
+        end_effector_pose.M.data[7] = eiPose(2,1);
+        end_effector_pose.M.data[8] = eiPose(2,2);
+        end_effector_pose.p.data[2] = eiPose(2,3);
+
+        //Compute IK
+        KDL::JntArray result;
+        int rc = tracik_solver.CartToJnt(nominal,end_effector_pose,result);
+        if (rc>=0) {
+              ROS_INFO("J0=%f,J1=%f,J2=%f,J3=%f,J4=%f,J5=%f;",
+                                  result.data[0],result.data[1],result.data[2],result.data[3],result.data[4],result.data[5]);
+              return true;
+        }
+          else {
+              ROS_INFO("No valid solution found!!!");
+              return false;
+          }
+        //Define action Goal
+        actGoal.goal.trajectory.joint_names=joint_names;
+        trajectory_msgs::JointTrajectoryPoint joint_angles;
+        for(int i=0;i<6;++i)
+            joint_angles.positions.push_back((double)result.data[i]);
+        actGoal.goal.trajectory.points.push_back(joint_angles);
+
     }
 
     bool performCalibration()
@@ -234,9 +328,22 @@ public:
     }
 
 public:
+    //number of poses for calibration
     int num_poses_;
+    //Define kinematics chain for IK solver
+    std::string chain_start_;
+    std::string chain_end_;
     std::string tcp_name_;
+    std::string base_name_;
+    //Define joint names
+    std::vector<std::string> joint_names;
+    //Time duration for IK solver
+    double timeout_;
+    //URDF varable
+    std::string urdf_param_;
+    //Approximate distance for cal board to camera
     float calTabDistance; //unit: meter
+    //Visualization hemisphere for pose sampling
     visualization_msgs::Marker sphere;
 };
 
