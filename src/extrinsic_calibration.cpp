@@ -84,18 +84,21 @@ class ex_cal
     ensenso::InitCalibration init_cal_srv;
     ensenso::CapturePattern capture_pattern_srv;
     ensenso::ComputeCalibration compute_cal_srv;
+    //Default pose
+    Eigen::Affine3d default_pose;
 
 public:
     ex_cal(int num_poses):
         num_poses_(num_poses)
     {
-        //initialize parameters
+        //initialize action parameters
         nh.param("chain_start", chain_start_, std::string("base"));
         nh.param("chain_end", chain_end_, std::string("tool0"));
         base_name_=chain_start_;
         tcp_name_=chain_end_;
         nh.param("timeout", timeout_, 0.005);
         nh.param("urdf_param", urdf_param_, std::string("/robot_description"));
+        nh.param("action_server",action_server_,std::string("/arm_controller/follow_joint_trajectory"));
         joint_names.push_back("shoulder_pan_joint");
         joint_names.push_back("shoulder_lift_joint");
         joint_names.push_back("elbow_joint");
@@ -109,9 +112,18 @@ public:
         capture_pattern_client = nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
         init_cal_client = nh.serviceClient<ensenso::InitCalibration>("init_calibration");
         compute_cal_client = nh.serviceClient<ensenso::ComputeCalibration>("compute_calibration");
+        //Initialize default pose
+        Eigen::Matrix4d m;
+        m<< 0.0, 1.0, 0.0, 0.5,
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, -1.0, 0.4,
+            0.0, 0.0, 0.0, 1.0;
+        default_pose = Eigen::Affine3d(m);
+        int p=0;
+
     }
 
-    bool ur5_trac_ik(const std::string& chain_start, const std::string& chain_end,const geometry_msgs::Pose& pose,control_msgs::FollowJointTrajectoryActionGoal& actGoal)
+    bool ur5_trac_ik(const std::string& chain_start, const std::string& chain_end,const Eigen::Affine3d& Pose,control_msgs::FollowJointTrajectoryGoal& actGoal,int t)
     {
         double eps = 1e-5;
 
@@ -144,42 +156,49 @@ public:
           nominal(j) = (ll(j)+ul(j))/2.0;
         }
 
-        //Convert geometry_msg/pose to eigen pose
-        Eigen::Affine3d eiPose;
-        tf::poseMsgToEigen(pose,eiPose);
         //Asign value to KDL pose
         KDL::Frame end_effector_pose;
-        end_effector_pose.M.data[0] = eiPose(0,0);
-        end_effector_pose.M.data[1] = eiPose(0,1);
-        end_effector_pose.M.data[2] = eiPose(0,2);
-        end_effector_pose.p.data[0] = eiPose(0,3);
-        end_effector_pose.M.data[3] = eiPose(1,0);
-        end_effector_pose.M.data[4] = eiPose(1,1);
-        end_effector_pose.M.data[5] = eiPose(1,2);
-        end_effector_pose.p.data[1] = eiPose(1,3);
-        end_effector_pose.M.data[6] = eiPose(2,0);
-        end_effector_pose.M.data[7] = eiPose(2,1);
-        end_effector_pose.M.data[8] = eiPose(2,2);
-        end_effector_pose.p.data[2] = eiPose(2,3);
+        end_effector_pose.M.data[0] = Pose(0,0);
+        end_effector_pose.M.data[1] = Pose(0,1);
+        end_effector_pose.M.data[2] = Pose(0,2);
+        end_effector_pose.p.data[0] = Pose(0,3);
+        end_effector_pose.M.data[3] = Pose(1,0);
+        end_effector_pose.M.data[4] = Pose(1,1);
+        end_effector_pose.M.data[5] = Pose(1,2);
+        end_effector_pose.p.data[1] = Pose(1,3);
+        end_effector_pose.M.data[6] = Pose(2,0);
+        end_effector_pose.M.data[7] = Pose(2,1);
+        end_effector_pose.M.data[8] = Pose(2,2);
+        end_effector_pose.p.data[2] = Pose(2,3);
 
         //Compute IK
         KDL::JntArray result;
         int rc = tracik_solver.CartToJnt(nominal,end_effector_pose,result);
         if (rc>=0) {
-              ROS_INFO("J0=%f,J1=%f,J2=%f,J3=%f,J4=%f,J5=%f;",
-                                  result.data[0],result.data[1],result.data[2],result.data[3],result.data[4],result.data[5]);
-              return true;
+//              ROS_INFO("J0=%f,J1=%f,J2=%f,J3=%f,J4=%f,J5=%f;",
+//                                  result.data[0],result.data[1],result.data[2],result.data[3],result.data[4],result.data[5]);
+
         }
           else {
               ROS_INFO("No valid solution found!!!");
               return false;
           }
         //Define action Goal
-        actGoal.goal.trajectory.joint_names=joint_names;
-        trajectory_msgs::JointTrajectoryPoint joint_angles;
+        actGoal.trajectory.joint_names=joint_names;
+        //Define single point in the trajectory
+        trajectory_msgs::JointTrajectoryPoint joint_traj_point;
         for(int i=0;i<6;++i)
-            joint_angles.positions.push_back((double)result.data[i]);
-        actGoal.goal.trajectory.points.push_back(joint_angles);
+        {
+            joint_traj_point.positions.push_back((double)result.data[i]);
+            joint_traj_point.velocities.push_back(0.0);
+            joint_traj_point.accelerations.push_back(0.0);
+
+        }
+        joint_traj_point.time_from_start=ros::Duration(t);
+        //actGoal.goal_time_tolerance=ros::Duration(5.0);
+
+        actGoal.trajectory.points.push_back(joint_traj_point);
+        return true;
 
     }
 
@@ -327,6 +346,50 @@ public:
         return true;
     }
 
+    void testURcontrol()
+    {
+        //Action client
+        actionlib::SimpleActionClient<control_msgs::FollowJointTrajectoryAction> FJT_client(action_server_,true);
+
+        //Go to the default pose
+        control_msgs::FollowJointTrajectoryGoal home;
+        ur5_trac_ik(chain_start_,chain_end_,default_pose,home,2.0);
+        FJT_client.waitForServer();
+        FJT_client.sendGoal(home);
+        FJT_client.waitForResult();
+
+        Eigen::Vector3d tool_origin(0.5,0.0,0.3);
+        Eigen::Vector3d obj_origin(0.5,0.0,0.0);
+
+        int i=0;
+        while(i<num_poses_){
+            control_msgs::FollowJointTrajectoryGoal goal;
+            control_msgs::FollowJointTrajectoryGoal home_goal;
+            Eigen::Affine3d wayPoint = generateRandomHemispherePose(obj_origin,tool_origin);
+            if(ur5_trac_ik(chain_start_,chain_end_,wayPoint,goal,3.0))
+            {
+                FJT_client.waitForServer();
+                FJT_client.sendGoal(goal);
+                if(FJT_client.waitForResult(ros::Duration(5.0)))
+                    {
+                    ROS_INFO("UR has reach the %d desired position",i+1);
+                    std::cout<<i+1<<"position"<<std::endl;
+                }else{
+                    ROS_INFO("Time out! UR cannot reach the %d desired position",i+1);
+                }
+                //Go home
+                ur5_trac_ik(chain_start_,chain_end_,default_pose,home_goal,2.0);
+                FJT_client.waitForServer();
+                FJT_client.sendGoal(home_goal);
+                FJT_client.waitForResult();
+                std::cout<<"home"<<std::endl;
+
+             }
+            i++;
+        }
+
+    }
+
 public:
     //number of poses for calibration
     int num_poses_;
@@ -341,6 +404,8 @@ public:
     double timeout_;
     //URDF varable
     std::string urdf_param_;
+    //Name of the action server
+    std::string action_server_;
     //Approximate distance for cal board to camera
     float calTabDistance; //unit: meter
     //Visualization hemisphere for pose sampling
@@ -350,29 +415,34 @@ public:
 
 int main(int argc, char** argv)
 {
-
+    ROS_INFO("-1");
     ros::init(argc,argv,"extrin_cal");
-    ros::NodeHandle nh;
+    ROS_INFO("0");
+    ex_cal calibration(10);
+    ROS_INFO("2");
+    calibration.testURcontrol();
+//    ros::NodeHandle nh;
+//    //Publisher
+//    ros::Publisher image_pub=nh.advertise<sensor_msgs::Image>("/registered_image",1);
+//    ros::Publisher cloud_pub=nh.advertise<sensor_msgs::PointCloud2>("/registered_pointcloud",1);
 
-    //Publisher
-    ros::Publisher image_pub=nh.advertise<sensor_msgs::Image>("/registered_image",1);
-    ros::Publisher cloud_pub=nh.advertise<sensor_msgs::PointCloud2>("/registered_pointcloud",1);
+//    //Service client
+//    ros::ServiceClient capture_pattern_client=nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
+//    ros::ServiceClient ini_cal_client=nh.serviceClient<ensenso::InitCalibration>("init_calibration");
+//    ros::ServiceClient grab_registered_image_client=nh.serviceClient<ensenso::RegistImage>("grab_registered_image");
+//    //Service srv
+//    ensenso::RegistImage grab_registImg_srv;
+//    grab_registImg_srv.request.is_rgb=true;
 
-    //Service client
-    ros::ServiceClient capture_pattern_client=nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
-    ros::ServiceClient ini_cal_client=nh.serviceClient<ensenso::InitCalibration>("init_calibration");
-    ros::ServiceClient grab_registered_image_client=nh.serviceClient<ensenso::RegistImage>("grab_registered_image");
-    //Service srv
-    ensenso::RegistImage grab_registImg_srv;
-    grab_registImg_srv.request.is_rgb=true;
+//    ros::Rate loop(1);
+//    while(ros::ok()){
+//        grab_registered_image_client.call(grab_registImg_srv);
+//        image_pub.publish(grab_registImg_srv.response.image);
+//        cloud_pub.publish(grab_registImg_srv.response.pointcloud);
+//        loop.sleep();
+//    }
 
-    ros::Rate loop(1);
-    while(ros::ok()){
-        grab_registered_image_client.call(grab_registImg_srv);
-        image_pub.publish(grab_registImg_srv.response.image);
-        cloud_pub.publish(grab_registImg_srv.response.pointcloud);
-        loop.sleep();
-    }
+
 
 
     return 0;
