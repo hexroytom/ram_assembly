@@ -17,6 +17,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf_conversions
   image_transport
   trac_ik_lib
+  moveit_ros_planning_interface
 )
 
 find_package(PCL REQUIRED)
@@ -151,6 +152,7 @@ target_link_libraries(MomentOfInertiaEstimation
 ## Declare a C++ executable
  add_executable(ram_recog_node src/ram_recog.cpp)
  add_executable(calibration_node src/extrinsic_calibration.cpp)
+ add_executable(ur_moveit_node src/test_ur_moveit.cpp)
 
 ## Add cmake target dependencies of the executable
 ## same as for the library above
@@ -164,6 +166,12 @@ target_link_libraries(MomentOfInertiaEstimation
  )
 
 target_link_libraries(calibration_node
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${orocos_kdl_LIBRARIES}
+)
+
+target_link_libraries(ur_moveit_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${orocos_kdl_LIBRARIES}

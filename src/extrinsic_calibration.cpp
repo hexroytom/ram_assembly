@@ -10,6 +10,10 @@
 #include <ensenso/InitCalibration.h>
 #include <ensenso/ComputeCalibration.h>
 #include <ensenso/RegistImage.h>
+#include <ensenso/ConfigureStreaming.h>
+#include <moveit/move_group_interface/move_group.h>
+#include <moveit/planning_interface/planning_interface.h>
+#include <moveit_msgs/ExecuteKnownTrajectory.h>
 
 //msg
 #include <control_msgs/FollowJointTrajectoryAction.h>
@@ -21,7 +25,11 @@
 #include <trac_ik/trac_ik.hpp>
 #include <kdl/chainiksolverpos_nr_jl.hpp>
 
+//std
 #include <string>
+#include <iostream>
+
+using namespace std;
 
 Eigen::Affine3d generateRandomHemispherePose(const Eigen::Vector3d &obj_origin, const Eigen::Vector3d &tool_origin)
 {
@@ -30,7 +38,7 @@ Eigen::Affine3d generateRandomHemispherePose(const Eigen::Vector3d &obj_origin, 
   point[2] = obj_origin[2];
   double radius = (obj_origin - tool_origin).norm();
 
-  while (point[2] < obj_origin[2] + 0.9 * radius)
+  while (point[2] < obj_origin[2] + 0.8 * radius)
   {
     double phy = rand() % 161 + 10;
     double teta = rand() % 360;
@@ -70,6 +78,34 @@ Eigen::Affine3d generateRandomHemispherePose(const Eigen::Vector3d &obj_origin, 
   return pose;
 }
 
+void get_tool_to_camera_tf(tf::Vector3 cam_to_tool_position, tf::Quaternion cam_to_tool_orientation)
+{
+        tf::Transform cam_to_tool;
+        cam_to_tool.setOrigin(cam_to_tool_position);
+        cam_to_tool.setRotation(cam_to_tool_orientation);
+        tf::Transform tool_to_cam=cam_to_tool.inverse();
+        tf::Vector3 position=tool_to_cam.getOrigin();
+        tf::Quaternion orientation=tool_to_cam.getRotation();
+        std::cout<<"tool0 to camera Position: X Y Z "<<position.getX()<<" "<<position.getY()<<" "<<position.getZ()<<std::endl;
+        std::cout<<"tool0 to camera Orientation: W X Y Z"<<orientation.getW()<<" "<<orientation.getX()<<" "<<orientation.getY()<<" "<<orientation.getZ()<<std::endl;
+
+}
+
+void tfToGeometryMsg(tf::StampedTransform& tf, geometry_msgs::Pose& pose)
+{
+    //Orientation
+    pose.orientation.w=tf.getRotation().getW();
+    pose.orientation.x=tf.getRotation().getX();
+    pose.orientation.y=tf.getRotation().getY();
+    pose.orientation.z=tf.getRotation().getZ();
+
+    //Position
+    pose.position.x=tf.getOrigin().getX();
+    pose.position.y=tf.getOrigin().getY();
+    pose.position.z=tf.getOrigin().getZ();
+
+}
+
 class ex_cal
 {
     ros::NodeHandle nh;
@@ -80,16 +116,23 @@ class ex_cal
     ros::ServiceClient capture_pattern_client;
     ros::ServiceClient init_cal_client;
     ros::ServiceClient compute_cal_client;
+    ros::ServiceClient config_stream_client;
     //Service srv
     ensenso::InitCalibration init_cal_srv;
-    ensenso::CapturePattern capture_pattern_srv;
     ensenso::ComputeCalibration compute_cal_srv;
     //Default pose
     Eigen::Affine3d default_pose;
+    //Grid space
+    double grid_space_;
 
 public:
-    ex_cal(int num_poses):
-        num_poses_(num_poses)
+    ex_cal(int num_poses,double ee_x,double ee_y,double ee_z,double calTabDist,double grid_space):
+        num_poses_(num_poses),
+        pos_x(ee_x),
+        pos_y(ee_y),
+        pos_z(ee_z),
+        calTabDistance(calTabDist),
+        grid_space_(grid_space)
     {
         //initialize action parameters
         nh.param("chain_start", chain_start_, std::string("base"));
@@ -112,6 +155,7 @@ public:
         capture_pattern_client = nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
         init_cal_client = nh.serviceClient<ensenso::InitCalibration>("init_calibration");
         compute_cal_client = nh.serviceClient<ensenso::ComputeCalibration>("compute_calibration");
+        config_stream_client = nh.serviceClient<ensenso::ConfigureStreaming>("configure_streaming");
         //Initialize default pose
         Eigen::Matrix4d m;
         m<< 0.0, 1.0, 0.0, 0.5,
@@ -120,6 +164,16 @@ public:
             0.0, 0.0, 0.0, 1.0;
         default_pose = Eigen::Affine3d(m);
         int p=0;
+        //Define marker
+        sphere.header.frame_id="/base";
+        sphere.lifetime = ros::Duration();
+        sphere.color.r = 0.6f;
+        sphere.color.g = 0.6f;
+        sphere.color.b = 0.6f;
+        sphere.color.a = 0.5;
+        sphere.id = 0;
+        sphere.type = visualization_msgs::Marker::SPHERE;
+        sphere.action = visualization_msgs::Marker::ADD;
 
     }
 
@@ -204,108 +258,134 @@ public:
 
     bool performCalibration()
     {
-        //get UR initial pose
-        tf::TransformListener listener;
-        listener.waitForTransform("/base",tcp_name_,ros::Time::now(),ros::Duration(3.0));
-        tf::StampedTransform transform_stamped;
+        //Config ensenso to stream only images
+        ensenso::ConfigureStreaming conf_stream_srv;
+        conf_stream_srv.request.cloud=false;
+        conf_stream_srv.request.images=true;
+        ros::service::waitForService("configure_streaming");
+        config_stream_client.call(conf_stream_srv);
 
-        Eigen::Affine3d initial_pose;
-        std_msgs::String status;
-        try{
-            listener.lookupTransform("/base",tcp_name_,ros::Time(0),transform_stamped);
-            tf::transformTFToEigen(transform_stamped,initial_pose);
-        }
-        catch (tf::TransformException &ex)
-        {
-            status.data=ex.what();
-            status_pub.publish(status);
-            return false;
-        }
+        ros::AsyncSpinner spinner(1);
+        spinner.start();
+
+        //Initialize move group
+        moveit::planning_interface::MoveGroup group("calibration");
+        group.setPoseReferenceFrame("/base");
+        group.setMaxVelocityScalingFactor(0.3);
+        group.setMaxAccelerationScalingFactor(0.3);
+        moveit::planning_interface::MoveGroup::Plan planner;
+
+        //Move UR to "up" pose and get pose msg
+        group.setNamedTarget("up_calibration");
+        group.move();
 
         //Generate hemisphere for robot poses generation
-        Eigen::Vector3d tool_origin(initial_pose.translation()[0],
-                                    initial_pose.translation()[1],
-                                    initial_pose.translation()[2]),obj_origin(tool_origin[0],tool_origin[1],tool_origin[2]-calTabDistance/1000.0);
+        Eigen::Vector3d tool_origin(pos_x,pos_y,pos_z);
+        Eigen::Vector3d obj_origin(pos_x,pos_y,pos_z-calTabDistance);
 
         sphere.header.stamp=ros::Time::now();
         sphere.pose.position.x=obj_origin[0];
         sphere.pose.position.y=obj_origin[1];
         sphere.pose.position.z=obj_origin[2];
-        sphere.scale.x=2*(calTabDistance/1000);
-        sphere.scale.y=2*(calTabDistance/1000);
-        sphere.scale.z=2*(calTabDistance/1000);
+        sphere.scale.x=2*(calTabDistance);
+        sphere.scale.y=2*(calTabDistance);
+        sphere.scale.z=2*(calTabDistance);
 
         marker_pub.publish(sphere);
 
         //vector for storing UR poses
-        std::vector<Eigen::Affine3d, Eigen::aligned_allocator<Eigen::Affine3d> > robot_poses;
-        int fail_count=0;
-
+        //std::vector<Eigen::Affine3d, Eigen::aligned_allocator<Eigen::Affine3d> > robot_poses;
+        std::vector<geometry_msgs::Pose> robot_poses;
         //Initialize Calibration (Set grid space & Clear buffer)
         ros::service::waitForService("init_calibration");
-        init_cal_srv.request.grid_spacing=20.0;
+        init_cal_srv.request.grid_spacing=grid_space_;
         init_cal_client.call(init_cal_srv);
         if(!init_cal_srv.response.success){
             ROS_ERROR("Initialize calibration fail!");
             return false;
         }
 
+        int fail_count=0;
+        //TF listener for cellecting robot poses
+        tf::TransformListener listener;
+        tf::StampedTransform transform_stamped;
+        std_msgs::String status;
+
+        int pose_collected=0;
+        int pattern_collected=0;
+        int num_pattern=0;
+
+
         while(nh.ok() && robot_poses.size()<num_poses_)
         {
             geometry_msgs::Pose wayPoint;
 
-            if(fail_count>5){
-                //Deal with failure...
-                ROS_ERROR("Too many failures! Abort calibration!");
+//            if(fail_count>10){
+//                //Deal with failure...
+//                ROS_ERROR("Too many failures! Abort calibration!");
 
-                //Go back to initial pose
-                tf::poseEigenToMsg(initial_pose,wayPoint);
-                    //...
+//                //Go back to initial pose
+//                group.setNamedTarget("up");
+//                group.move();
 
-                return false;
-            }
+//                return false;
+//            }
 
-            //get a random point on the hemisphere
+            //get a random point on the hemisphere and plan
             tf::poseEigenToMsg(generateRandomHemispherePose(obj_origin,tool_origin),wayPoint);
-
-            //Move UR to the random point
-                //...
-
-            //sleep until UR reach the goal point
-            sleep(1);
-
-            //Collect patterns
-                //block until service available
-            ros::service::waitForService("capture_pattern");
-            capture_pattern_client.call(capture_pattern_srv);
-
-            if(!capture_pattern_srv.response.success)
+            group.setPoseTarget(wayPoint);
+            bool success=group.plan(planner);
+            if(!success)
             {
                 fail_count++;
-                //Move UR to defalut pose
-                    //...
+                std::cout<<"Motion Planning fail: "<<fail_count<<std::endl;
                 continue;
+
+            }
+            else
+            {
+                //Move UR to the random point
+                group.move();
+                //sleep until UR reach the goal point
+                sleep(1);
+
+                //Collect patterns
+                    //block until service available
+                ros::service::waitForService("capture_pattern");
+                ensenso::CapturePattern capture_pattern_srv;
+                capture_pattern_client.call(capture_pattern_srv);
+
+                if(!capture_pattern_srv.response.success)
+                {
+                    fail_count++;
+                    ROS_ERROR("The %d th pattern captureing fail..",fail_count);
+                    std::cout<<"Pattern capture fail: "<<fail_count<<std::endl;
+                    continue;
+                }
+                pattern_collected++;
+                cout<<"Pattern collected successfully: "<<pattern_collected<<endl;
+
+                //collect robot pose
+                try{
+                    ros::Time now(ros::Time::now());
+                    listener.waitForTransform("/base",tcp_name_,now,ros::Duration(1.5));
+                    listener.lookupTransform("/base",tcp_name_,now,transform_stamped);
+                    geometry_msgs::Pose robot_pose;
+                    tfToGeometryMsg(transform_stamped,robot_pose);
+                    robot_poses.push_back(robot_pose);
+                    pose_collected++;
+                    cout<<"Pose collected successfully: "<<pose_collected<<endl;
+                }
+                catch(tf::TransformException& ex){
+                    status.data = ex.what();
+                    status_pub.publish(status);
+                    return false;
+                }
+
+                sleep(1);
+                num_pattern=capture_pattern_srv.response.pattern_count;
             }
 
-            //collect robot pose
-            try{
-                ros::Time now(ros::Time::now());
-                listener.waitForTransform("/base",tcp_name_,now,ros::Duration(1.5));
-                listener.lookupTransform("/base",tcp_name_,now,transform_stamped);
-                Eigen::Affine3d robot_pose;
-                tf::transformTFToEigen(transform_stamped,robot_pose);
-                robot_poses.push_back(robot_pose);
-            }
-            catch(tf::TransformException& ex){
-                status.data = ex.what();
-                status_pub.publish(status);
-                return false;
-            }
-
-            sleep(1);
-
-            //Move UR to initial pose
-                //...
 
         }
 
@@ -313,7 +393,7 @@ public:
         status.data = "Computing calibration matrix...";
         status_pub.publish(status);
 
-        if(robot_poses.size()!=capture_pattern_srv.response.pattern_count){
+        if(robot_poses.size()!=num_pattern){
             ROS_ERROR("The number of robot poses is not consistent with the counts of pattern. Aborting calibraiton!");
             return false;
         }else{
@@ -323,8 +403,7 @@ public:
             tf::poseEigenToMsg(Eigen::Affine3d::Identity(),compute_cal_srv.request.seed);
                 //Populate the srv poses
             compute_cal_srv.request.robotposes.poses.resize(robot_poses.size());
-            for(int i=0;i<robot_poses.size();++i)
-                tf::poseEigenToMsg(robot_poses[i],compute_cal_srv.request.robotposes.poses[i]);
+            compute_cal_srv.request.robotposes.poses.assign(robot_poses.begin(),robot_poses.end());
             //call the srv
             compute_cal_client.call(compute_cal_srv);
         }
@@ -333,6 +412,10 @@ public:
             ROS_INFO("Result: ");
             ROS_INFO("Position: x = %f, y = %f, z = %f",compute_cal_srv.response.result.position.x,compute_cal_srv.response.result.position.y,compute_cal_srv.response.result.position.z);
             ROS_INFO("Orientation: w = %f, x = %f, y = %f, z = %f",compute_cal_srv.response.result.orientation.w,compute_cal_srv.response.result.orientation.x,compute_cal_srv.response.result.orientation.y,compute_cal_srv.response.result.orientation.z);
+
+            tf::Vector3 cam_to_tool_position(compute_cal_srv.response.result.position.x,compute_cal_srv.response.result.position.y,compute_cal_srv.response.result.position.z);
+            tf::Quaternion cam_to_tool_orientation(compute_cal_srv.response.result.orientation.x,compute_cal_srv.response.result.orientation.y,compute_cal_srv.response.result.orientation.z,compute_cal_srv.response.result.orientation.w);
+            get_tool_to_camera_tf(cam_to_tool_position,cam_to_tool_orientation);
 
         }else{
             ROS_ERROR("Fail to compute extrinsic calibration!");
@@ -390,6 +473,125 @@ public:
 
     }
 
+    void testURcontrol_withMoveit()
+    {
+        Eigen::Vector3d tool_origin(0.36216,-0.38496,0.42582);
+        Eigen::Vector3d obj_origin(0.36216,-0.38496,0.0);
+
+        //Move group definition
+        moveit::planning_interface::MoveGroup group("calibration");
+        group.setPoseReferenceFrame("/base");
+        moveit::planning_interface::MoveGroup::Plan planner;
+
+        ros::AsyncSpinner spinner(1);
+        spinner.start();
+
+        int i=0;
+        while(i<num_poses_)
+        {
+            Eigen::Affine3d wayPoint = generateRandomHemispherePose(obj_origin,tool_origin);
+            geometry_msgs::Pose goalPose;
+            tf::poseEigenToMsg(wayPoint,goalPose);
+
+            group.setPoseTarget(goalPose);
+            bool is_success=group.plan(planner);
+
+            if(is_success)
+            {
+                cout<<"Planning succeed! Ready to move the robot"<<endl;
+                group.move();
+                sleep(1);
+            }else{
+                cout<<"Planning fail"<<endl;
+            }
+
+            ++i;
+        }
+        spinner.stop();
+    }
+
+     void testURcontrol_withService()
+     {
+         //Initialize pose
+         ros::AsyncSpinner spinner(1);
+         spinner.start();
+
+         //Move group definition
+         moveit::planning_interface::MoveGroup group("calibration");
+         group.setPoseReferenceFrame("/base");
+         group.setPlanningTime(2);
+
+         //Move to up position.
+         group.setNamedTarget("up_calibration");
+         group.move();
+         sleep(2);
+
+         // Initialize trajectory
+         moveit_msgs::ExecuteKnownTrajectory srv;
+         srv.request.wait_for_execution = true;
+         ros::ServiceClient executeKnownTrajectoryServiceClient = nh.serviceClient<moveit_msgs::ExecuteKnownTrajectory>(
+             "/execute_kinematic_path");
+         std::vector<geometry_msgs::Pose> way_points_msg(1);
+
+         //Generate desired pose
+         Eigen::Vector3d tool_origin(0.3,0.0,0.5);
+         Eigen::Vector3d obj_origin(0.3,0.0,0.0);
+         tf::poseEigenToMsg(generateRandomHemispherePose(obj_origin, tool_origin), way_points_msg[0]);
+
+         //Plan a trajectory
+         for(int i=0;i<num_poses_;++i)
+         {
+             double precision=group.computeCartesianPath(way_points_msg, 0.1, 0, srv.request.trajectory);
+//             if (precision<0.95)
+//            {
+//                ROS_WARN_STREAM("Cannot reach pose: skipping to next pose");
+//                cout<<"Planning fail"<<endl;
+//                continue;
+//            }
+             for (unsigned i = 0; i < srv.request.trajectory.joint_trajectory.points.size(); ++i)
+             {
+               for (unsigned j = 0; j < 6; ++j)
+                 srv.request.trajectory.joint_trajectory.points[i].velocities.push_back(0.5);
+             }
+             executeKnownTrajectoryServiceClient.call(srv);
+            sleep(2);
+         }
+
+    }
+
+    void testCalibration()
+    {
+        Eigen::Matrix4d m;
+        m << 0.0, -1.0, 0.0, 0.217083,
+             -1.0, 0.0, 0.0, -0.285758,
+             0.0, 0.0, -1.0, 0.0403132,
+             0.0, 0.0, 0.0, 1.0;
+        Eigen::Affine3d robot_pose_(m);
+        geometry_msgs::Pose robot_pose;
+        tf::poseEigenToMsg(robot_pose_,robot_pose);
+        //Z offset
+        robot_pose.position.z+=0.142;
+
+        ros::AsyncSpinner spinner(1);
+        spinner.start();
+        moveit::planning_interface::MoveGroup group("calibration");
+        group.setPoseReferenceFrame("/base");
+        group.setMaxVelocityScalingFactor(0.3);
+        group.setMaxAccelerationScalingFactor(0.3);
+        group.setPoseTarget(robot_pose);
+
+        moveit::planning_interface::MoveGroup::Plan planner;
+        if(group.plan(planner))
+            {
+            group.move();
+        }else{
+            std::cout<<"Planning fail!"<<std::endl;
+        }
+        spinner.stop();
+
+
+    }
+
 public:
     //number of poses for calibration
     int num_poses_;
@@ -406,43 +608,46 @@ public:
     std::string urdf_param_;
     //Name of the action server
     std::string action_server_;
+    //Initial calibration position
+    double pos_x,pos_y,pos_z;
     //Approximate distance for cal board to camera
-    float calTabDistance; //unit: meter
+    double calTabDistance; //unit: meter
     //Visualization hemisphere for pose sampling
     visualization_msgs::Marker sphere;
 };
 
+//Utility to get tf
+tf::StampedTransform get_Transform(std::string parent,std::string child)
+{
+    tf::TransformListener listener;
+    tf::StampedTransform transform;
+    listener.waitForTransform(parent,child,ros::Time(0),ros::Duration(1.5));
+    listener.lookupTransform(parent,child,ros::Time(0),transform);
+    std::cout<<parent<<" to "<<child<<" transfotm: "<<std::endl;
+    std::cout<<"Position: "<<"x: "<<transform.getOrigin().getX()<<" y: "<<transform.getOrigin().getY()<<" z: "<<transform.getOrigin().getZ()<<std::endl;
+    std::cout<<"Orientation: "<<"x: "<<transform.getRotation().getX()<<" y: "<<transform.getRotation().getY()<<" z: "<<transform.getRotation().getZ()<<" w: "<<transform.getRotation().getW()<<std::endl;
+
+    return transform;
+}
+
+
 
 int main(int argc, char** argv)
 {
-    ROS_INFO("-1");
     ros::init(argc,argv,"extrin_cal");
-    ROS_INFO("0");
-    ex_cal calibration(10);
-    ROS_INFO("2");
-    calibration.testURcontrol();
+    ex_cal calibration(50,0.26233,-0.31279,0.45148,0.42,12.5);
+    //calibration.performCalibration();
+    calibration.performCalibration();
+
+
 //    ros::NodeHandle nh;
-//    //Publisher
-//    ros::Publisher image_pub=nh.advertise<sensor_msgs::Image>("/registered_image",1);
-//    ros::Publisher cloud_pub=nh.advertise<sensor_msgs::PointCloud2>("/registered_pointcloud",1);
-
-//    //Service client
-//    ros::ServiceClient capture_pattern_client=nh.serviceClient<ensenso::CapturePattern>("capture_pattern");
-//    ros::ServiceClient ini_cal_client=nh.serviceClient<ensenso::InitCalibration>("init_calibration");
-//    ros::ServiceClient grab_registered_image_client=nh.serviceClient<ensenso::RegistImage>("grab_registered_image");
-//    //Service srv
-//    ensenso::RegistImage grab_registImg_srv;
-//    grab_registImg_srv.request.is_rgb=true;
-
-//    ros::Rate loop(1);
-//    while(ros::ok()){
-//        grab_registered_image_client.call(grab_registImg_srv);
-//        image_pub.publish(grab_registImg_srv.response.image);
-//        cloud_pub.publish(grab_registImg_srv.response.pointcloud);
-//        loop.sleep();
-//    }
-
-
+//    tf::StampedTransform transform_stamped=get_Transform("base","camera_link");
+//    Eigen::Affine3d eigen_tranform;
+//    tf::poseTFToEigen(transform_stamped,eigen_tranform);
+//    //Define obj point from nxView and transform it
+//    Eigen::Vector3d obj_point(0.07738,0.04148,0.38156);
+//    Eigen::Vector3d obj_point_tf=eigen_tranform*obj_point;
+//    std::cout<<"X: "<<obj_point_tf[0]<<" Y: "<<obj_point_tf[1]<<" Z: "<<obj_point_tf[2]<<std::endl;
 
 
     return 0;
