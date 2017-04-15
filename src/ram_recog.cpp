@@ -33,6 +33,7 @@
 #include <pcl/common/pca.h>
 #include <pcl/common/common.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/surface/mls.h>
 
 #include "ram_assembly/moment_of_inertia_estimation.h"
 
@@ -257,13 +258,13 @@ public:
 
         //graping pose
         double y_offset = (max_point_OBB.y-min_point_OBB.y)/2;
-        y_offset += 0.015;
+        y_offset += 0.02;
         Eigen::Vector3d mass_center_offset;
         mass_center_offset(0)=mass_center(0)+y_offset*middle_vector(0);
         mass_center_offset(1)=mass_center(1)+y_offset*middle_vector(1);
         mass_center_offset(2)=mass_center(2)+y_offset*middle_vector(2);
 
-        double z_offset=0.002;
+        double z_offset=0.0;
         mass_center_offset(0)=mass_center_offset(0)-z_offset*minor_vector(0);
         mass_center_offset(1)=mass_center_offset(1)-z_offset*minor_vector(1);
         mass_center_offset(2)=mass_center_offset(2)-z_offset*minor_vector(2);
@@ -404,12 +405,12 @@ public:
 
         moveit::planning_interface::MoveGroup::Plan planner;
         planner.trajectory_=robot_traj;
-
 //            moveit_msgs::DisplayTrajectory display_traj;
 //            display_traj.trajectory_start=planner.start_state_;
 //            display_traj.trajectory.push_back(planner.trajectory_);
 //            traj_publisher.publish(display_traj);
         group->execute(planner);
+        spinner.stop();
     }
 
     bool moveToInitPose()
@@ -422,19 +423,21 @@ public:
 
         group->setNamedTarget("up");
         group->move();
+        sleep(1);
 
         std::vector<double> joint_angles(6);
-        joint_angles[0]=-37.31/180.0*M_PI;
-        joint_angles[1]=-18.85/180.0*M_PI;
-        joint_angles[2]=-158.31/180.0*M_PI;
-        joint_angles[3]=-42.02/180.0*M_PI;
-        joint_angles[4]=84.37/180.0*M_PI;
-        joint_angles[5]=-88.68/180.0*M_PI;
+        joint_angles[0]=-50.54/180.0*M_PI;
+        joint_angles[1]=-40.64/180.0*M_PI;
+        joint_angles[2]=-142.28/180.0*M_PI;
+        joint_angles[3]=-49.39/180.0*M_PI;
+        joint_angles[4]=78.64/180.0*M_PI;
+        joint_angles[5]=-73.15/180.0*M_PI;
         group->setJointValueTarget(joint_angles);
 
         if(group->plan(planner))
         {
             group->move();
+            sleep(1);
         }else{
             std::cout<<"Planning fail!"<<std::endl;\
             return false;
@@ -443,14 +446,34 @@ public:
         return true;
     }
 
+    void mls_smooth(PointCloudXYZ::Ptr input_pts, float search_radius,PointCloudXYZ::Ptr output_pts)
+    {
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+
+        pcl::MovingLeastSquares<pcl::PointXYZ,pcl::PointXYZ> mls;
+        mls.setInputCloud(input_pts);
+        mls.setComputeNormals(false);
+        mls.setPolynomialFit(true);
+        mls.setSearchMethod(tree);
+        mls.setSearchRadius(search_radius);
+
+        mls.process(*output_pts);
+
+    }
+
 };
 
 tf::StampedTransform get_Transform(std::string parent,std::string child)
 {
     tf::TransformListener listener;
     tf::StampedTransform transform;
-    listener.waitForTransform(parent,child,ros::Time(0),ros::Duration(1.5));
-    listener.lookupTransform(parent,child,ros::Time(0),transform);
+    bool is_received = listener.waitForTransform(parent,child,ros::Time(0),ros::Duration(4.0));
+    if(is_received){
+        listener.lookupTransform(parent,child,ros::Time(0),transform);}
+    else
+        {
+        ROS_ERROR("Can not receive transform from base to camera_link");
+    }
     std::cout<<parent<<" to "<<child<<" transfotm: "<<std::endl;
     std::cout<<"Position: "<<"x: "<<transform.getOrigin().getX()<<" y: "<<transform.getOrigin().getY()<<" z: "<<transform.getOrigin().getZ()<<std::endl;
     std::cout<<"Orientation: "<<"x: "<<transform.getRotation().getX()<<" y: "<<transform.getRotation().getY()<<" z: "<<transform.getRotation().getZ()<<" w: "<<transform.getRotation().getW()<<std::endl;
@@ -479,13 +502,17 @@ int main(int argc,char** argv)
     PointCloudXYZ::Ptr ram(new PointCloudXYZ);
     ram_rec.regionGrowingseg(ram_rec.pts_no_plane,ram);
 
+    //Smooth the pointcloud using MLS
+    PointCloudXYZ::Ptr ram_mls(new PointCloudXYZ);
+    ram_rec.mls_smooth(ram,0.01,ram_mls);
+
     //Use PCA analysis to get pose
-    Eigen::Affine3d cam2obj_tf_ = ram_rec.poseEstimationByMomentOfInertia(ram,true);
+    Eigen::Affine3d cam2obj_tf_ = ram_rec.poseEstimationByMomentOfInertia(ram_mls,true);
     tf::Transform cam2obj_tf;
     tf::poseEigenToTF(cam2obj_tf_,cam2obj_tf);
 
     //Get base--->camera transform
-    tf::Transform base2cam_tf=get_Transform("base","camera_link");
+    tf::Transform base2cam_tf=get_Transform("/base","/camera_link");
     tf::Transform base2obj_tf=base2cam_tf * cam2obj_tf;
 
     //Interpolation
@@ -494,6 +521,5 @@ int main(int argc,char** argv)
 
     //Perform grasping
     ram_rec.performGrasping(robot_traj);
-
 
 }

@@ -23,6 +23,7 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(PCL REQUIRED)
 find_package(ensenso REQUIRED)
 find_package(orocos_kdl REQUIRED)
+find_package(OpenCV REQUIRED)
 
 
 ## System dependencies are found with CMake's conventions
@@ -132,6 +133,7 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
   ${orocos_kdl_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 
@@ -153,6 +155,9 @@ target_link_libraries(MomentOfInertiaEstimation
  add_executable(ram_recog_node src/ram_recog.cpp)
  add_executable(calibration_node src/extrinsic_calibration.cpp)
  add_executable(ur_moveit_node src/test_ur_moveit.cpp)
+ add_executable(cylinder_test src/cylinder.cpp)
+ add_executable(pole_test src/pole_det.cpp)
+ add_executable(ram_extract src/ram_extract_test.cpp)
 
 ## Add cmake target dependencies of the executable
 ## same as for the library above
@@ -175,6 +180,25 @@ target_link_libraries(ur_moveit_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${orocos_kdl_LIBRARIES}
+)
+
+target_link_libraries(cylinder_test
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+)
+
+target_link_libraries(pole_test
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+target_link_libraries(ram_extract
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${PCL_LIBRARIES}
+  MomentOfInertiaEstimation
 )
 
 #############

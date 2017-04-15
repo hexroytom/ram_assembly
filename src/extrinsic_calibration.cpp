@@ -38,7 +38,7 @@ Eigen::Affine3d generateRandomHemispherePose(const Eigen::Vector3d &obj_origin, 
   point[2] = obj_origin[2];
   double radius = (obj_origin - tool_origin).norm();
 
-  while (point[2] < obj_origin[2] + 0.8 * radius)
+  while (point[2] < obj_origin[2] + 0.90 * radius)
   {
     double phy = rand() % 161 + 10;
     double teta = rand() % 360;
@@ -412,7 +412,7 @@ public:
             ROS_INFO("Result: ");
             ROS_INFO("Position: x = %f, y = %f, z = %f",compute_cal_srv.response.result.position.x,compute_cal_srv.response.result.position.y,compute_cal_srv.response.result.position.z);
             ROS_INFO("Orientation: w = %f, x = %f, y = %f, z = %f",compute_cal_srv.response.result.orientation.w,compute_cal_srv.response.result.orientation.x,compute_cal_srv.response.result.orientation.y,compute_cal_srv.response.result.orientation.z);
-
+            ROS_INFO("Reprojection error: %f",compute_cal_srv.response.reprojection_error);
             tf::Vector3 cam_to_tool_position(compute_cal_srv.response.result.position.x,compute_cal_srv.response.result.position.y,compute_cal_srv.response.result.position.z);
             tf::Quaternion cam_to_tool_orientation(compute_cal_srv.response.result.orientation.x,compute_cal_srv.response.result.orientation.y,compute_cal_srv.response.result.orientation.z,compute_cal_srv.response.result.orientation.w);
             get_tool_to_camera_tf(cam_to_tool_position,cam_to_tool_orientation);
@@ -635,20 +635,32 @@ tf::StampedTransform get_Transform(std::string parent,std::string child)
 int main(int argc, char** argv)
 {
     ros::init(argc,argv,"extrin_cal");
-    ex_cal calibration(50,0.26233,-0.31279,0.45148,0.42,12.5);
-    //calibration.performCalibration();
+    int num_poses=0;
+    double ee_x=0.0;
+    double ee_y=0.0;
+    double ee_z=0.0;
+    double cal_dist=0.0;
+    double grid_space=0.0;
+
+    //Defalut params
+    if(argc < 6)
+        {
+        num_poses=30;
+        ee_x=0.39945;
+        ee_y=-0.29936;
+        ee_z=0.53653;
+        cal_dist=0.45;
+        grid_space=12.50;    //Unit: mm
+    }
+    else{
+        num_poses=atoi(argv[1]);
+        ee_x=atof(argv[2]);
+        ee_y=atof(argv[3]);
+        ee_z=atof(argv[4]);
+        cal_dist=atof(argv[5]);
+        grid_space=atof(argv[6]);    //Unit: mm
+    }
+    ex_cal calibration(num_poses,ee_x,ee_y,ee_z,cal_dist,grid_space);
     calibration.performCalibration();
-
-
-//    ros::NodeHandle nh;
-//    tf::StampedTransform transform_stamped=get_Transform("base","camera_link");
-//    Eigen::Affine3d eigen_tranform;
-//    tf::poseTFToEigen(transform_stamped,eigen_tranform);
-//    //Define obj point from nxView and transform it
-//    Eigen::Vector3d obj_point(0.07738,0.04148,0.38156);
-//    Eigen::Vector3d obj_point_tf=eigen_tranform*obj_point;
-//    std::cout<<"X: "<<obj_point_tf[0]<<" Y: "<<obj_point_tf[1]<<" Z: "<<obj_point_tf[2]<<std::endl;
-
-
     return 0;
 }
